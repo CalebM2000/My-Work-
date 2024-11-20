@@ -1,0 +1,125 @@
+# File: live_trading_bot.py
+
+from binance.client import Client
+import pandas as pd
+import time
+import logging
+import requests
+
+# === CONFIGURATION ===
+API_KEY = "API_Key_Here"  # Replace with your Binance.US API Key
+API_SECRET = "Secret_Key_Here"  # Replace with your Binance.US API Secret
+SYMBOL = "BTCUSDT"
+TRADE_QUANTITY = 0.001  # Adjust as per your risk management
+FAST_MA_PERIOD = 9
+SLOW_MA_PERIOD = 21
+INTERVAL = Client.KLINE_INTERVAL_1HOUR
+TELEGRAM_BOT_TOKEN = "Your_Telegram_Bot_Token"  # Optional
+TELEGRAM_CHAT_ID = "Your_Telegram_Chat_ID"  # Optional
+
+# Initialize the Binance Client
+try:
+    client = Client(API_KEY, API_SECRET, tld="us")
+    client.ping()
+    print("Successfully connected to Binance.US API.")
+except Exception as e:
+    print(f"Failed to connect to Binance.US API: {e}")
+    exit()
+
+# === LOGGING CONFIGURATION ===
+logging.basicConfig(
+    filename="trading_bot.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+# === FUNCTIONS ===
+# Fetch live market data
+def fetch_live_data(symbol, interval, limit=500):
+    try:
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        df = pd.DataFrame(
+            klines,
+            columns=[
+                "Open Time", "Open", "High", "Low", "Close", "Volume",
+                "Close Time", "Quote Asset Volume", "Number of Trades",
+                "Taker Buy Base Asset Volume", "Taker Buy Quote Asset Volume", "Ignore"
+            ]
+        )
+        df["Open Time"] = pd.to_datetime(df["Open Time"], unit="ms")
+        df.set_index("Open Time", inplace=True)
+        df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+        return df
+    except Exception as e:
+        logging.error(f"Error fetching live data: {e}")
+        return None
+
+# Calculate moving averages and generate signals
+def check_signals(data):
+    fast_ma = data['Close'].rolling(window=FAST_MA_PERIOD).mean()
+    slow_ma = data['Close'].rolling(window=SLOW_MA_PERIOD).mean()
+    
+    if fast_ma.iloc[-1] > slow_ma.iloc[-1]:
+        return "BUY"
+    elif fast_ma.iloc[-1] < slow_ma.iloc[-1]:
+        return "SELL"
+    else:
+        return "HOLD"
+
+# Place an order
+def place_order(symbol, side, quantity):
+    try:
+        order = client.create_order(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=quantity
+        )
+        logging.info(f"Order placed: {order}")
+        send_telegram_message(f"Order placed: {order}")
+        return order
+    except Exception as e:
+        logging.error(f"Failed to place order: {e}")
+        send_telegram_message(f"Failed to place order: {e}")
+        return None
+
+# Send Telegram notification (Optional)
+def send_telegram_message(message):
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+        except Exception as e:
+            logging.error(f"Failed to send Telegram message: {e}")
+
+# === MAIN SCRIPT ===
+if __name__ == "__main__":
+    logging.info("Starting live trading bot.")
+    send_telegram_message("Starting live trading bot.")
+    
+    while True:
+        try:
+            # Fetch live data
+            live_data = fetch_live_data(SYMBOL, INTERVAL)
+            if live_data is None or len(live_data) < SLOW_MA_PERIOD:
+                logging.warning("Not enough data to calculate signals.")
+                time.sleep(60)
+                continue
+
+            # Generate trading signal
+            signal = check_signals(live_data)
+            logging.info(f"Generated signal: {signal}")
+
+            # Execute trade based on signal
+            if signal == "BUY":
+                place_order(SYMBOL, "BUY", TRADE_QUANTITY)
+            elif signal == "SELL":
+                place_order(SYMBOL, "SELL", TRADE_QUANTITY)
+
+            # Wait for the next interval
+            time.sleep(60 * 60)  # Adjust for the 1-hour interval
+
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            send_telegram_message(f"Unexpected error: {e}")
+            time.sleep(60)
